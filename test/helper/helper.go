@@ -306,10 +306,11 @@ func TestConfig() *server.Config {
 			GatewayAddr:                 fmt.Sprintf("localhost:%d", RPCPort+portOffset),
 		},
 		Mongo: &mongo.Config{
-			ConnectionURI:     MongoConnectionURI,
-			ConnectionTimeout: MongoConnectionTimeout,
-			PingTimeout:       MongoPingTimeout,
-			YorkieDatabase:    TestDBName(),
+			ConnectionURI:            MongoConnectionURI,
+			ConnectionTimeout:        MongoConnectionTimeout,
+			PingTimeout:              MongoPingTimeout,
+			YorkieDatabase:           TestDBName(),
+			SnapshotChangesChunkSize: int64(server.DefaultSnapshotChangesChunkSize),
 		},
 	}
 }
