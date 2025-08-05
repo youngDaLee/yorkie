@@ -54,7 +54,7 @@ func TestNewConfigFromFile(t *testing.T) {
 		assert.Equal(t, connTimeout, server.DefaultMongoConnectionTimeout)
 		assert.Equal(t, conf.Mongo.ConnectionURI, server.DefaultMongoConnectionURI)
 		assert.Equal(t, conf.Mongo.YorkieDatabase, server.DefaultMongoYorkieDatabase)
-		assert.Equal(t, conf.Mongo.SnapshotChangesChunkSize, server.DefaultSnapshotChangesChunkSize)
+		assert.Equal(t, conf.Mongo.SnapshotChangesChunkSize, int64(server.DefaultSnapshotChangesChunkSize))
 
 		pingTimeout, err := time.ParseDuration(conf.Mongo.PingTimeout)
 		assert.NoError(t, err)
