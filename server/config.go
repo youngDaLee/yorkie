@@ -52,6 +52,7 @@ const (
 	DefaultMongoPingTimeout                  = 5 * time.Second
 	DefaultMongoYorkieDatabase               = "yorkie-meta"
 	DefaultMongoMonitoringSlowQueryThreshold = 100 * time.Millisecond
+	DefaultSnapshotChangesChunkSize          = 100
 
 	DefaultKafkaTopic        = "user-events"
 	DefaultKafkaWriteTimeout = 5 * time.Second
@@ -260,6 +261,10 @@ func (c *Config) ensureDefaultValue() {
 			if c.Mongo.MonitoringSlowQueryThreshold == "" {
 				c.Mongo.MonitoringSlowQueryThreshold = DefaultMongoMonitoringSlowQueryThreshold.String()
 			}
+		}
+
+		if c.Mongo.SnapshotChangesChunkSize == 0 {
+			c.Mongo.SnapshotChangesChunkSize = DefaultSnapshotChangesChunkSize
 		}
 	}
 }
