@@ -35,6 +35,9 @@ type Config struct {
 	// MonitoringSlowQueryThreshold is the threshold in milliseconds to log slow queries.
 	// If a query takes longer than this threshold, it will be logged as a slow query.
 	MonitoringSlowQueryThreshold string `yaml:"MonitoringSlowQueryThreshold"`
+
+	// SnapshotChangesChunkSize is the chunk size of changes to load gradually when creating a snapshot.
+	SnapshotChangesChunkSize int64 `yaml:"SnapshotChangesChunkSize"`
 }
 
 // Validate returns an error if the provided Config is invalidated.

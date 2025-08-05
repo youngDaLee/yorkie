@@ -116,6 +116,9 @@ Mongo:
   # PingTimeout is the timeout for pinging MongoDB.
   PingTimeout: "5s"
 
+  # SnapshotChangesChunkSize is the chunk size for snapshot changes.
+  SnapshotChangesChunkSize: 100
+
 # Kafka is the yorkie analytics message broker configuration (Optional).
 Kafka:
   # Addresses is the URI to connect to message broker.
