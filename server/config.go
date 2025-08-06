@@ -52,6 +52,7 @@ const (
 	DefaultMongoPingTimeout                  = 5 * time.Second
 	DefaultMongoYorkieDatabase               = "yorkie-meta"
 	DefaultMongoMonitoringSlowQueryThreshold = 100 * time.Millisecond
+	DefaultSnapshotChangesChunkSize          = 100
 
 	DefaultKafkaTopic        = "user-events"
 	DefaultKafkaWriteTimeout = 5 * time.Second
