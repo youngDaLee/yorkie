@@ -24,7 +24,7 @@ import (
 	gotime "time"
 
 	"github.com/hashicorp/go-memdb"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/yorkie-team/yorkie/api/converter"
 	"github.com/yorkie-team/yorkie/api/types"
@@ -55,6 +55,168 @@ func New() (*DB, error) {
 
 // Close closes the database.
 func (d *DB) Close() error {
+	return nil
+}
+
+// leadershipRecord wraps LeadershipInfo with an ID for memory database storage.
+type leadershipRecord struct {
+	ID   string                   `json:"id"`
+	Info *database.LeadershipInfo `json:"info"`
+}
+
+// TryLeadership attempts to acquire or renew leadership with the given lease duration.
+// If leaseToken is empty, it attempts to acquire new leadership.
+// If leaseToken is provided, it attempts to renew the existing lease.
+func (d *DB) TryLeadership(
+	ctx context.Context,
+	hostname string,
+	leaseToken string,
+	leaseDuration gotime.Duration,
+) (*database.LeadershipInfo, error) {
+	txn := d.db.Txn(true)
+	defer txn.Abort()
+
+	now := gotime.Now()
+	expiresAt := now.Add(leaseDuration)
+
+	// Find existing leadership
+	raw, err := txn.First(tblLeaderships, "id", "leadership")
+	if err != nil {
+		return nil, fmt.Errorf("find leadership: %w", err)
+	}
+
+	var existing *database.LeadershipInfo
+	if raw != nil {
+		existing = raw.(*leadershipRecord).Info
+	}
+
+	if leaseToken == "" {
+		// Attempting to acquire new leadership
+		if existing != nil {
+			// Check if current leadership has expired
+			if existing.ExpiresAt.After(now) {
+				// Leadership is still valid, return existing leadership
+				return existing, nil
+			}
+		}
+
+		// Generate new lease token
+		newToken, err := database.GenerateLeaseToken()
+		if err != nil {
+			return nil, fmt.Errorf("generate lease token: %w", err)
+		}
+
+		// Create or update leadership entry
+		newLeadership := &database.LeadershipInfo{
+			Hostname:   hostname,
+			LeaseToken: newToken,
+			ElectedAt:  now,
+			ExpiresAt:  expiresAt,
+			Term:       1, // Start with term 1 for new leadership
+		}
+
+		if existing != nil {
+			// Update existing entry with new term
+			newLeadership.Term = existing.Term + 1
+		}
+
+		record := &leadershipRecord{
+			ID:   "leadership",
+			Info: newLeadership,
+		}
+
+		if err := txn.Insert(tblLeaderships, record); err != nil {
+			return nil, fmt.Errorf("insert leadership: %w", err)
+		}
+
+		txn.Commit()
+		return newLeadership, nil
+	}
+
+	// Attempting to renew existing leadership
+	if existing == nil {
+		return nil, database.ErrInvalidLeaseToken
+	}
+
+	// Validate the lease token
+	if existing.LeaseToken != leaseToken {
+		return nil, database.ErrInvalidLeaseToken
+	}
+
+	// Check if the node is the current leader
+	if existing.Hostname != hostname {
+		return nil, database.ErrInvalidLeaseToken
+	}
+
+	// Check if leadership has expired
+	if existing.ExpiresAt.Before(now) {
+		return nil, database.ErrInvalidLeaseToken
+	}
+
+	// Generate new lease token for renewal
+	newToken, err := database.GenerateLeaseToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate lease token: %w", err)
+	}
+
+	// Update with new token and expiry
+	renewedLeadership := &database.LeadershipInfo{
+		Hostname:   existing.Hostname,
+		LeaseToken: newToken,
+		ElectedAt:  existing.ElectedAt,
+		ExpiresAt:  expiresAt,
+		RenewedAt:  now,
+		Term:       existing.Term, // Keep the same term for renewal
+	}
+
+	record := &leadershipRecord{
+		ID:   "leadership",
+		Info: renewedLeadership,
+	}
+
+	if err := txn.Insert(tblLeaderships, record); err != nil {
+		return nil, fmt.Errorf("update leadership: %w", err)
+	}
+
+	txn.Commit()
+	return renewedLeadership, nil
+}
+
+// FindLeadership returns the current leadership information.
+func (d *DB) FindLeadership(ctx context.Context) (*database.LeadershipInfo, error) {
+	txn := d.db.Txn(false)
+	defer txn.Abort()
+
+	raw, err := txn.First(tblLeaderships, "id", "leadership")
+	if err != nil {
+		return nil, fmt.Errorf("find leadership: %w", err)
+	}
+	if raw == nil {
+		return nil, nil
+	}
+
+	leadershipInfo := raw.(*leadershipRecord).Info
+
+	// Check if leadership has expired
+	if leadershipInfo.IsExpired() {
+		return nil, nil
+	}
+
+	return leadershipInfo, nil
+}
+
+// ClearLeadership removes the current leadership information for testing purposes.
+func (d *DB) ClearLeadership(ctx context.Context) error {
+	txn := d.db.Txn(true)
+	defer txn.Abort()
+
+	// Delete the leadership record if it exists
+	_, err := txn.DeleteAll(tblLeaderships, "id", "leadership")
+	if err != nil {
+		return fmt.Errorf("clear leadership: %w", err)
+	}
+
+	txn.Commit()
 	return nil
 }
 
@@ -585,6 +747,74 @@ func (d *DB) ActivateClient(
 	return clientInfo, nil
 }
 
+// TryAttaching updates the status of the document to Attaching to prevent
+// deactivating the client while the document is being attached.
+func (d *DB) TryAttaching(_ context.Context, refKey types.ClientRefKey, docID types.ID) (*database.ClientInfo, error) {
+	if err := refKey.ClientID.Validate(); err != nil {
+		return nil, err
+	}
+	if err := docID.Validate(); err != nil {
+		return nil, err
+	}
+
+	txn := d.db.Txn(true)
+	defer txn.Abort()
+
+	raw, err := txn.First(tblClients, "id", refKey.ClientID.String())
+	if err != nil {
+		return nil, fmt.Errorf("find client by id: %w", err)
+	}
+
+	if raw == nil {
+		return nil, fmt.Errorf("%s: %w", refKey.ClientID, database.ErrClientNotFound)
+	}
+
+	clientInfo := raw.(*database.ClientInfo)
+	if err := clientInfo.CheckIfInProject(refKey.ProjectID); err != nil {
+		return nil, err
+	}
+
+	// Check if client is activated
+	if clientInfo.Status != database.ClientActivated {
+		return nil, fmt.Errorf(
+			"conditions not satisfied to attach document: %w",
+			database.ErrClientNotFound,
+		)
+	}
+
+	// Check if document is not already attached
+	if clientInfo.Documents != nil &&
+		clientInfo.Documents[docID] != nil &&
+		clientInfo.Documents[docID].Status == database.DocumentAttached {
+		return nil, fmt.Errorf(
+			"conditions not satisfied to attach document: %w",
+			database.ErrClientNotFound,
+		)
+	}
+
+	// DeepCopy to avoid modifying the original object
+	clientInfo = clientInfo.DeepCopy()
+
+	// Set document to attaching state
+	if clientInfo.Documents == nil {
+		clientInfo.Documents = make(map[types.ID]*database.ClientDocInfo)
+	}
+
+	clientInfo.Documents[docID] = &database.ClientDocInfo{
+		Status:    database.DocumentAttaching,
+		ServerSeq: 0,
+		ClientSeq: 0,
+	}
+	clientInfo.UpdatedAt = gotime.Now()
+
+	if err := txn.Insert(tblClients, clientInfo); err != nil {
+		return nil, fmt.Errorf("update client: %w", err)
+	}
+
+	txn.Commit()
+	return clientInfo, nil
+}
+
 // DeactivateClient deactivates a client.
 func (d *DB) DeactivateClient(_ context.Context, refKey types.ClientRefKey) (*database.ClientInfo, error) {
 	if err := refKey.ClientID.Validate(); err != nil {
@@ -606,6 +836,25 @@ func (d *DB) DeactivateClient(_ context.Context, refKey types.ClientRefKey) (*da
 	clientInfo := raw.(*database.ClientInfo)
 	if err := clientInfo.CheckIfInProject(refKey.ProjectID); err != nil {
 		return nil, err
+	}
+
+	// Check if client is not already deactivated
+	if clientInfo.Status == database.ClientDeactivated {
+		return nil, fmt.Errorf(
+			"conditions not satisfied to deactivate client: %w",
+			database.ErrClientNotFound,
+		)
+	}
+
+	// Check if any document is currently attaching or attached
+	for _, docInfo := range clientInfo.Documents {
+		if docInfo.Status == database.DocumentAttaching ||
+			docInfo.Status == database.DocumentAttached {
+			return nil, fmt.Errorf(
+				"conditions not satisfied to deactivate client: %w",
+				database.ErrClientNotFound,
+			)
+		}
 	}
 
 	// NOTE(hackerwins): When retrieving objects from go-memdb, references to
@@ -1872,7 +2121,7 @@ func (d *DB) purgeDocumentInternals(
 }
 
 func newID() types.ID {
-	return types.ID(primitive.NewObjectID().Hex())
+	return types.ID(bson.NewObjectID().Hex())
 }
 
 // RotateProjectKeys rotates the API keys of the project.

@@ -25,11 +25,10 @@ import (
 	gotime "time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/yorkie-team/yorkie/api/converter"
 	"github.com/yorkie-team/yorkie/api/types"
@@ -64,7 +63,7 @@ func Dial(conf *Config) (*Client, error) {
 
 	clientOptions := options.Client().
 		ApplyURI(conf.ConnectionURI).
-		SetRegistry(NewRegistryBuilder().Build())
+		SetRegistry(NewRegistryBuilder())
 
 	if conf.MonitoringEnabled {
 		threshold, err := gotime.ParseDuration(conf.MonitoringSlowQueryThreshold)
@@ -80,7 +79,9 @@ func Dial(conf *Config) (*Client, error) {
 		clientOptions.SetMonitor(monitor.CreateCommandMonitor())
 	}
 
-	client, err := mongo.Connect(ctx, clientOptions)
+	client, err := mongo.Connect(
+		clientOptions,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("connect to mongo: %w", err)
 	}
@@ -135,6 +136,165 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// TryLeadership attempts to acquire or renew leadership with the given lease duration.
+// If leaseToken is empty, it attempts to acquire new leadership.
+// If leaseToken is provided, it attempts to renew the existing lease.
+func (c *Client) TryLeadership(
+	ctx context.Context,
+	hostname,
+	leaseToken string,
+	leaseDuration gotime.Duration,
+) (*database.LeadershipInfo, error) {
+	leaseMS := leaseDuration.Milliseconds()
+
+	if leaseToken == "" {
+		return c.tryAcquireLeadership(ctx, hostname, leaseMS)
+	}
+
+	return c.tryRenewLeadership(ctx, hostname, leaseToken, leaseMS)
+}
+
+// FindLeadership returns the current leadership information.
+func (c *Client) FindLeadership(
+	ctx context.Context,
+) (*database.LeadershipInfo, error) {
+	result := c.collection(ColLeaderships).FindOne(ctx, bson.M{"singleton": 1})
+	if result.Err() == mongo.ErrNoDocuments {
+		return nil, nil
+	}
+	if result.Err() != nil {
+		return nil, fmt.Errorf("find leadership: %w", result.Err())
+	}
+
+	var info database.LeadershipInfo
+	if err := result.Decode(&info); err != nil {
+		return nil, fmt.Errorf("decode leadership info: %w", err)
+	}
+
+	// Check if leadership has expired
+	if info.IsExpired() {
+		return nil, nil
+	}
+
+	return &info, nil
+}
+
+// tryAcquireLeadership attempts to acquire new leadership.
+func (c *Client) tryAcquireLeadership(
+	ctx context.Context,
+	hostname string,
+	leaseMS int64,
+) (*database.LeadershipInfo, error) {
+	// Generate a new lease token
+	token, err := database.GenerateLeaseToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate lease token: %w", err)
+	}
+
+	// Try to acquire leadership using atomic upsert.
+	expired := bson.D{{Key: "$lt", Value: bson.A{"$expires_at", "$$NOW"}}}
+	result := c.collection(ColLeaderships).FindOneAndUpdate(
+		ctx,
+		bson.D{
+			{Key: "singleton", Value: 1},
+		},
+		mongo.Pipeline{
+			{{Key: "$replaceWith", Value: bson.D{
+				{Key: "$cond", Value: bson.A{
+					expired,
+					// if expired
+					bson.D{{Key: "$mergeObjects", Value: bson.A{
+						"$$ROOT",
+						bson.D{
+							{Key: "expires_at", Value: bson.D{{Key: "$add", Value: bson.A{"$$NOW", leaseMS}}}},
+							{Key: "lease_token", Value: token},
+							{Key: "term", Value: bson.D{{Key: "$add", Value: bson.A{
+								bson.D{{Key: "$ifNull", Value: bson.A{"$term", 0}}}, 1}}},
+							},
+							{Key: "hostname", Value: hostname},
+							{Key: "renewed_at", Value: "$$NOW"},
+							{Key: "elected_at", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$elected_at", "$$NOW"}}}},
+							{Key: "singleton", Value: 1},
+						},
+					}}},
+					"$$ROOT", // else
+				}},
+			}}},
+		}, options.FindOneAndUpdate().
+			SetUpsert(true).
+			SetReturnDocument(options.After),
+	)
+
+	var info database.LeadershipInfo
+	if err := result.Decode(&info); err != nil {
+		// If the error is due to a duplicate key, it means another node has
+		// already acquired leadership.
+		if mongo.IsDuplicateKeyError(err) {
+			return c.FindLeadership(ctx)
+		}
+
+		return nil, fmt.Errorf("decode new leadership: %w", err)
+	}
+
+	// Successfully acquired leadership
+	return &info, nil
+}
+
+// tryRenewLeadership attempts to renew existing leadership
+func (c *Client) tryRenewLeadership(
+	ctx context.Context,
+	hostname string,
+	leaseToken string,
+	leaseMS int64,
+) (*database.LeadershipInfo, error) {
+	// Generate a new lease token for renewal
+	newLeaseToken, err := database.GenerateLeaseToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate lease token: %w", err)
+	}
+
+	// Try to update the existing leadership with the correct token and hostname.
+	result := c.collection(ColLeaderships).FindOneAndUpdate(
+		ctx,
+		bson.M{
+			"singleton":   1,
+			"hostname":    hostname,
+			"lease_token": leaseToken,
+		},
+		mongo.Pipeline{
+			{{Key: "$set", Value: bson.D{
+				{Key: "lease_token", Value: newLeaseToken},
+				{Key: "expires_at", Value: bson.D{{Key: "$add", Value: bson.A{"$$NOW", leaseMS}}}},
+				{Key: "renewed_at", Value: "$$NOW"},
+			}}},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	)
+
+	if result.Err() == mongo.ErrNoDocuments {
+		return nil, fmt.Errorf("invalid token or node: %w", database.ErrInvalidLeaseToken)
+	}
+	if result.Err() != nil {
+		return nil, fmt.Errorf("renew leadership: %w", result.Err())
+	}
+
+	var info database.LeadershipInfo
+	if err := result.Decode(&info); err != nil {
+		return nil, fmt.Errorf("decode leadership info: %w", err)
+	}
+
+	return &info, nil
+}
+
+// ClearLeadership removes the current leadership information for testing purposes.
+func (c *Client) ClearLeadership(ctx context.Context) error {
+	_, err := c.collection(ColLeaderships).DeleteMany(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("clear leadership: %w", err)
+	}
+	return nil
+}
+
 // EnsureDefaultUserAndProject creates the default user and project if they do not exist.
 func (c *Client) EnsureDefaultUserAndProject(
 	ctx context.Context,
@@ -179,7 +339,7 @@ func (c *Client) ensureDefaultUserInfo(
 			"hashed_password": candidate.HashedPassword,
 			"created_at":      candidate.CreatedAt,
 		},
-	}, options.Update().SetUpsert(true))
+	}, options.UpdateOne().SetUpsert(true))
 	if err != nil {
 		return nil, fmt.Errorf("upsert default user info: %w", err)
 	}
@@ -222,7 +382,7 @@ func (c *Client) ensureDefaultProjectInfo(
 			"secret_key":                   candidate.SecretKey,
 			"created_at":                   candidate.CreatedAt,
 		},
-	}, options.Update().SetUpsert(true))
+	}, options.UpdateOne().SetUpsert(true))
 	if err != nil {
 		return nil, fmt.Errorf("create default project: %w", err)
 	}
@@ -267,7 +427,7 @@ func (c *Client) CreateProjectInfo(
 		return nil, fmt.Errorf("create project info: %w", err)
 	}
 
-	info.ID = types.ID(result.InsertedID.(primitive.ObjectID).Hex())
+	info.ID = types.ID(result.InsertedID.(bson.ObjectID).Hex())
 	return info, nil
 }
 
@@ -500,7 +660,7 @@ func (c *Client) CreateUserInfo(
 		return nil, fmt.Errorf("create user info: %w", err)
 	}
 
-	info.ID = types.ID(result.InsertedID.(primitive.ObjectID).Hex())
+	info.ID = types.ID(result.InsertedID.(bson.ObjectID).Hex())
 	return info, nil
 }
 
@@ -637,7 +797,7 @@ func (c *Client) ActivateClient(
 			StatusKey:    database.ClientActivated,
 			"updated_at": now,
 		},
-	}, options.Update().SetUpsert(true))
+	}, options.UpdateOne().SetUpsert(true))
 	if err != nil {
 		return nil, fmt.Errorf("upsert client: %w", err)
 	}
@@ -667,27 +827,87 @@ func (c *Client) ActivateClient(
 	return &clientInfo, nil
 }
 
-// DeactivateClient deactivates the client of the given refKey and updates document statuses as detached.
-func (c *Client) DeactivateClient(ctx context.Context, refKey types.ClientRefKey) (*database.ClientInfo, error) {
-	res := c.collection(ColClients).FindOneAndUpdate(ctx, bson.M{
-		"project_id": refKey.ProjectID,
-		"_id":        refKey.ClientID,
-	}, bson.M{
-		"$set": bson.M{
-			"status":     database.ClientDeactivated,
-			"updated_at": gotime.Now(),
+// TryAttaching updates the status of the document to Attaching to prevent
+// deactivating the client while the document is being attached.
+func (c *Client) TryAttaching(
+	ctx context.Context,
+	refKey types.ClientRefKey,
+	docID types.ID,
+) (*database.ClientInfo, error) {
+	// client must be activated and document must not be attached
+	result := c.collection(ColClients).FindOneAndUpdate(
+		ctx,
+		bson.M{
+			"project_id":                       refKey.ProjectID,
+			"_id":                              refKey.ClientID,
+			"status":                           database.ClientActivated,
+			clientDocInfoKey(docID, StatusKey): bson.M{"$ne": database.DocumentAttached},
 		},
-	}, options.FindOneAndUpdate().SetReturnDocument(options.After))
+		bson.M{
+			"$set": bson.M{
+				clientDocInfoKey(docID, StatusKey):    database.DocumentAttaching,
+				clientDocInfoKey(docID, "server_seq"): int64(0),
+				clientDocInfoKey(docID, "client_seq"): uint32(0),
+				"updated_at":                          gotime.Now(),
+			},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	)
 
-	clientInfo := database.ClientInfo{}
-	if err := res.Decode(&clientInfo); err != nil {
+	info := &database.ClientInfo{}
+	if err := result.Decode(info); err != nil {
 		if err == mongo.ErrNoDocuments {
-			return nil, fmt.Errorf("%s: %w", refKey, database.ErrClientNotFound)
+			return nil, fmt.Errorf("try to attach document: %w", database.ErrClientNotFound)
 		}
 		return nil, fmt.Errorf("decode client info: %w", err)
 	}
 
-	return &clientInfo, nil
+	return info, nil
+}
+
+// DeactivateClient deactivates the client of the given refKey.
+func (c *Client) DeactivateClient(
+	ctx context.Context,
+	refKey types.ClientRefKey,
+) (*database.ClientInfo, error) {
+	now := gotime.Now()
+
+	result := c.collection(ColClients).FindOneAndUpdate(
+		ctx,
+		bson.M{
+			"project_id": refKey.ProjectID,
+			"_id":        refKey.ClientID,
+			"status":     database.ClientActivated,
+			// Ensure that no documents are currently attaching or attached
+			"$expr": bson.M{"$not": bson.M{"$anyElementTrue": bson.M{"$map": bson.M{
+				"input": bson.M{"$ifNull": bson.A{bson.M{"$objectToArray": "$documents"}, bson.A{}}},
+				"as":    "doc",
+				"in": bson.M{"$in": bson.A{
+					"$$doc.v.status", bson.A{database.DocumentAttaching, database.DocumentAttached}},
+				},
+			}}}},
+		},
+		bson.M{
+			"$set": bson.M{
+				"status":     database.ClientDeactivated,
+				"updated_at": now,
+			},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	)
+
+	info := database.ClientInfo{}
+	if err := result.Decode(&info); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf(
+				"conditions not satisfied to deactivate client: %w",
+				database.ErrClientNotFound,
+			)
+		}
+		return nil, fmt.Errorf("decode client info: %w", err)
+	}
+
+	return &info, nil
 }
 
 // FindClientInfoByRefKey finds the client of the given refKey.
@@ -1568,7 +1788,7 @@ func (c *Client) updateVersionVector(
 			"project_id": docRefKey.ProjectID,
 			"doc_id":     docRefKey.DocID,
 			"client_id":  clientInfo.ID,
-		}, options.Delete()); err != nil {
+		}, options.DeleteOne()); err != nil {
 			return fmt.Errorf("delete version vector: %w", err)
 		}
 		return nil
@@ -1582,7 +1802,7 @@ func (c *Client) updateVersionVector(
 		"$set": bson.M{
 			"version_vector": vector,
 		},
-	}, options.Update().SetUpsert(true))
+	}, options.UpdateOne().SetUpsert(true))
 	if err != nil {
 		return fmt.Errorf("update version vector: %w", err)
 	}
@@ -1643,7 +1863,7 @@ func (c *Client) FindDocInfosByQuery(
 ) (*types.SearchResult[*database.DocInfo], error) {
 	cursor, err := c.collection(ColDocuments).Find(ctx, bson.M{
 		"project_id": projectID,
-		"key": bson.M{"$regex": primitive.Regex{
+		"key": bson.M{"$regex": bson.Regex{
 			Pattern: "^" + escapeRegex(query),
 		}},
 		"removed_at": bson.M{
@@ -1718,7 +1938,7 @@ func (c *Client) CreateSchemaInfo(
 	}
 
 	return &database.SchemaInfo{
-		ID:        types.ID(result.InsertedID.(primitive.ObjectID).Hex()),
+		ID:        types.ID(result.InsertedID.(bson.ObjectID).Hex()),
 		ProjectID: projectID,
 		Name:      name,
 		Version:   version,
@@ -1896,7 +2116,7 @@ func (c *Client) purgeDocumentInternals(
 
 func (c *Client) collection(
 	name string,
-	opts ...*options.CollectionOptions,
+	opts ...options.Lister[options.CollectionOptions],
 ) *mongo.Collection {
 	return c.client.
 		Database(c.config.YorkieDatabase).

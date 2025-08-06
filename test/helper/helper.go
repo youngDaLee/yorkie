@@ -31,10 +31,10 @@ import (
 	gotime "time"
 
 	"github.com/stretchr/testify/assert"
-	"go.mongodb.org/mongo-driver/bson"
-	gomongo "go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	gomongo "go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 	"go.uber.org/zap"
 
 	adminClient "github.com/yorkie-team/yorkie/admin"
@@ -434,10 +434,9 @@ func setupRawMongoClient(databaseName string) (*gomongo.Client, error) {
 	defer cancel()
 
 	client, err := gomongo.Connect(
-		ctx,
 		options.Client().
 			ApplyURI(conf.ConnectionURI).
-			SetRegistry(mongo.NewRegistryBuilder().Build()),
+			SetRegistry(mongo.NewRegistryBuilder()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connect to mongo: %w", err)
@@ -579,6 +578,15 @@ func WaitForServerToStart(addr string) error {
 	}
 
 	return fmt.Errorf("timeout for server to start: %s", addr)
+}
+
+// CreateProject creates a new project with given name.
+func CreateProject(t *testing.T, server *server.Yorkie, name string) *types.Project {
+	ctx := context.Background()
+	project, err := server.CreateProject(ctx, name)
+	assert.NoError(t, err)
+
+	return project
 }
 
 // CreateProjectAndDocuments creates a new project and documents for the given count.

@@ -7,6 +7,63 @@ and Yorkie adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.6.23] - 2025-08-01
+
+### Added
+
+- Add MongoDB-based leader election mechanism by @hackerwins in https://github.com/yorkie-team/yorkie/pull/1373
+- Add MoveFront/MoveLast and port array tests from JS SDK by @KMSstudio in https://github.com/yorkie-team/yorkie/pull/1415
+
+### Fixed
+
+- Fix race condition between Attach/PushPull and Deactivation by @kokodak in https://github.com/yorkie-team/yorkie/pull/1414
+- Remove deprecated SelectOperation by @hackerwins in https://github.com/yorkie-team/yorkie/pull/1417
+- Fix garbage collection design document typo by @kokodak in https://github.com/yorkie-team/yorkie/pull/1421
+
+### Removed
+
+## [v0.6.22] - 2025-07-28
+
+### Added
+
+- Add VSCode setting guide in CONTRIBUTING.md for test files by @ggyuchive in https://github.com/yorkie-team/yorkie/pull/1406
+
+### Changed
+
+- Migrate MongoDB Go driver from v1.17 to v2.2 by @krapie in https://github.com/yorkie-team/yorkie/pull/1405
+- Refactor actorID encoding from hex to Base64 for efficiency by @mnnseong in https://github.com/yorkie-team/yorkie/pull/1388
+
+## [v0.6.21] - 2025-07-23
+
+### Changed
+
+- Allow additional API host by @raararaara in https://github.com/yorkie-team/yorkie/pull/1396
+- Remove gopkg.in/yaml.v2 and unify YAML usage by @hackerwins in https://github.com/yorkie-team/yorkie/pull/1403
+
+### Fixed
+
+- Add feature to filter out stale presences by @kokodak in https://github.com/yorkie-team/yorkie/pull/1402
+- Resolve convergence issues in Array.Move and Array.Set by @KMSstudio in https://github.com/yorkie-team/yorkie/pull/1395
+
+## [v0.6.20] - 2025-07-17
+
+### Added
+
+- Add gRPC stream load test for presence using k6 by @kokodak in https://github.com/yorkie-team/yorkie/pull/1366
+- Add include_presences option to GetDocuments API by @kokodak https://github.com/yorkie-team/yorkie/pull/1391
+
+### Changed
+
+- Update shardKeys for document-wide collections to hashed by @emplam27 in https://github.com/yorkie-team/yorkie/pull/1323
+- Reflect recent updates to MongoDB Sharding by @hackerwins in https://github.com/yorkie-team/yorkie/pull/1378
+- Reflect recent updates to the locking document by @hackerwins in https://github.com/yorkie-team/yorkie/pull/1379
+
+### Fixed
+
+- Fix the 'Pushing Changes to Server' link in document-editing.md by @jojaeng2 in https://github.com/yorkie-team/yorkie/pull/1380
+- Fix the code link and description in pub-sub.md by @jojaeng2 in https://github.com/yorkie-team/yorkie/pull/1386
+- Restrict Default Project Usage in Cluster Mode by @raararaara in https://github.com/yorkie-team/yorkie/pull/1390
+
 ## [v0.6.19] - 2025-07-09
 
 ### Added

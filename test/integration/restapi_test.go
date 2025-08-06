@@ -133,7 +133,7 @@ func TestRESTAPI(t *testing.T) {
 		)
 		summary := &documentSummary{}
 		assert.NoError(t, gojson.Unmarshal(res, summary))
-		assert.Equal(t, "{}", summary.Document.Snapshot)
+		assert.Equal(t, "{}", summary.Document.Root)
 
 		ctx := context.Background()
 
@@ -157,7 +157,7 @@ func TestRESTAPI(t *testing.T) {
 			fmt.Sprintf(`{"project_name": "%s", "document_key": "%s"}`, project.Name, docs[0].Key()),
 		)
 		assert.NoError(t, gojson.Unmarshal(res, summary))
-		assert.Equal(t, `{"arr":[]}`, summary.Document.Snapshot)
+		assert.Equal(t, `{"arr":[]}`, summary.Document.Root)
 
 		assert.NoError(t, doc.Update(func(r *json.Object, p *presence.Presence) error {
 			r.GetArray("arr").AddInteger(1)
@@ -178,10 +178,22 @@ func TestRESTAPI(t *testing.T) {
 				)
 				summary := &documentSummary{}
 				assert.NoError(t, gojson.Unmarshal(res, summary))
-				assert.Equal(t, `{"arr":[1]}`, summary.Document.Snapshot)
+				assert.Equal(t, `{"arr":[1]}`, summary.Document.Root)
 			}()
 		}
 		wg.Wait()
+	})
+
+	t.Run("document api access control test", func(t *testing.T) {
+		project1 := helper.CreateProject(t, defaultServer, t.Name()+"1")
+		project2 := helper.CreateProject(t, defaultServer, t.Name()+"2")
+
+		postWithUnauthorizedErrorCheck(
+			t,
+			project1,
+			fmt.Sprintf("http://%s/yorkie.v1.AdminService/GetDocument", defaultServer.RPCAddr()),
+			fmt.Sprintf(`{"project_name": "%s", "document_key": "%s"}`, project2.Name, ""),
+		)
 	})
 }
 
@@ -200,4 +212,16 @@ func post(t *testing.T, project *types.Project, url, body string) []byte {
 	resBody, err := io.ReadAll(res.Body)
 	assert.NoError(t, err)
 	return resBody
+}
+
+func postWithUnauthorizedErrorCheck(t *testing.T, project *types.Project, url, body string) {
+	req, err := http.NewRequest("POST", url, strings.NewReader(body))
+	assert.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", project.SecretKey)
+
+	httpClient := http.Client{}
+	res, err := httpClient.Do(req)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, res.StatusCode)
 }
