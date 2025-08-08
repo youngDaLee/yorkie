@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/yorkie-team/yorkie/server"
 	"strings"
 	gotime "time"
 
@@ -1545,7 +1546,7 @@ func (c *Client) FindChangesBetweenServerSeqs(
 	return changes, nil
 }
 
-// FindChangeInfosBetweenServerSeqs returns the changeInfos between two server sequences.
+// FindChangeInfosBetweenServerSeqs returns the changeInfos between two server sequences by chunking.
 func (c *Client) FindChangeInfosBetweenServerSeqs(
 	ctx context.Context,
 	docRefKey types.DocRefKey,
@@ -1556,6 +1557,38 @@ func (c *Client) FindChangeInfosBetweenServerSeqs(
 		return nil, nil
 	}
 
+	chunk := c.config.SnapshotChangesChunkSize
+	if chunk <= 0 {
+		chunk = server.DefaultSnapshotChangesChunkSize
+	}
+	if to-from > chunk {
+		// If the range is too large, split it into smaller chunks
+		var allChanges []*database.ChangeInfo
+		for start := from; start <= to; start += chunk {
+			end := start + chunk - 1
+			if end > to {
+				end = to
+			}
+			changes, err := c.findChangeInfos(ctx, docRefKey, start, end)
+			if err != nil {
+				return nil, err
+			}
+			allChanges = append(allChanges, changes...)
+		}
+		return allChanges, nil
+	} else {
+		// If the range is small enough, fetch it directly
+		return c.findChangeInfos(ctx, docRefKey, from, to)
+	}
+}
+
+// findChangeInfos returns the changeInfos between two server sequences.
+func (c *Client) findChangeInfos(
+	ctx context.Context,
+	docRefKey types.DocRefKey,
+	from int64,
+	to int64,
+) ([]*database.ChangeInfo, error) {
 	// Get or create a change range store for this document
 	var store *ChangeStore
 	if cached, ok := c.changeCache.Get(docRefKey); ok {
